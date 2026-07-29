@@ -19,7 +19,7 @@ COMO USAR:
 from flask import Flask, request, jsonify
 import requests
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # ----------- CONFIGURAÇÃO (preencher com os teus dados da Ultramsg) -----------
 INSTANCE_ID = "instance186644"
