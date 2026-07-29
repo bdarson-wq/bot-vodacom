@@ -3,7 +3,7 @@ Bot de WhatsApp - DB Multi-Service (Versão 2.0 - com estados e fluxo de venda)
 -------------------------------------------------------------------------------
 Usa Ultramsg + Flask
 """
-
+import os
 from flask import Flask, request, jsonify
 import requests
 from datetime import datetime
