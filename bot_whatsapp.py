@@ -145,5 +145,5 @@ def home():
     return "Bot DB Multi-Service está a funcionar! ✅"
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
