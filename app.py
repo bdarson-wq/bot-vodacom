@@ -1,88 +1,64 @@
 """
-Bot de WhatsApp - DB Multi-Service (Versão 2.0 - com estados e fluxo de venda)
--------------------------------------------------------------------------------
-Usa Ultramsg + Flask
+Bot DB Multi-Service - Versão 3.0 (IA Groq + Vendas)
 """
-import os
+
 from flask import Flask, request, jsonify
 import requests
+import os
 from datetime import datetime
 from collections import defaultdict
+from openai import OpenAI
 
 app = Flask(__name__)
 
 # ==================== CONFIGURAÇÃO ====================
-INSTANCE_ID = "instance186644"          # ← Coloca o teu
-TOKEN = "e9gysv7lg3n1ctsp"                      # ← Coloca o teu
+INSTANCE_ID = os.environ.get("INSTANCE_ID", "")
+TOKEN = os.environ.get("TOKEN", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
 API_URL = f"https://api.ultramsg.com/{INSTANCE_ID}/messages/chat"
 
-# Números do administrador (recebem notificação de comprovativos)
-# Formato internacional sem o sinal + (ex: 258846818458)
+# Números dos administradores (recebem notificação de comprovativos)
 ADMIN_NUMBERS = [
     "258846818458",   # M-Pesa
     "258876063563",   # E-Mola
 ]
 
+# Cliente Groq (compatível com OpenAI)
+client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
+
 # ==================== CATÁLOGO DE PRODUTOS ====================
-# Fácil de editar / acrescentar novos produtos no futuro
+PRODUTOS_TEXTO = """
+=== OFERTAS ESPECIAIS (Voz + SMS + Internet) ===
+1. 7 Dias – 275 MT → 7.680 MB + 5 Min Internacionais + 25 MB Roaming
+2. 30 Dias – 468 MT → 10.138 MB + 10 Min Internacionais + 30 MB Roaming
+3. 30 Dias – 925 MT → 20.787 MB + 20 Min Internacionais + 80 MB Roaming
+4. 30 Dias – 1.400 MT → 31.744 MB + 30 Min Internacionais + 150 MB Roaming
+5. 30 Dias – 2.800 MT → 64.819 MB + 40 Min Internacionais + 700 MB Roaming
 
-PRODUTOS = {
-    "especiais": {
-        "nome": "Ofertas Especiais (Voz + SMS + Internet)",
-        "itens": {
-            "1": {"nome": "7 Dias – 275 MT", "preco": 275, "descricao": "7.680 MB + 5 Min Internacionais + 25 MB Roaming"},
-            "2": {"nome": "30 Dias – 468 MT", "preco": 468, "descricao": "10.138 MB + 10 Min Internacionais + 30 MB Roaming"},
-            "3": {"nome": "30 Dias – 925 MT", "preco": 925, "descricao": "20.787 MB + 20 Min Internacionais + 80 MB Roaming"},
-            "4": {"nome": "30 Dias – 1.400 MT", "preco": 1400, "descricao": "31.744 MB + 30 Min Internacionais + 150 MB Roaming"},
-            "5": {"nome": "30 Dias – 2.800 MT", "preco": 2800, "descricao": "64.819 MB + 40 Min Internacionais + 700 MB Roaming"},
-        }
-    },
-    "internet": {
-        "nome": "Ofertas só de Internet",
-        "itens": {
-            "1": {"nome": "WTF 7 Dias", "preco": 50, "descricao": "50 MT"},
-            "2": {"nome": "8.909 MB – 30 Dias", "preco": 280, "descricao": "280 MT"},
-            "3": {"nome": "16.589 MB – 30 Dias", "preco": 475, "descricao": "475 MT"},
-            "4": {"nome": "33.280 MB – 30 Dias", "preco": 950, "descricao": "950 MT"},
-        }
-    }
-}
+=== OFERTAS SÓ DE INTERNET ===
+1. WTF 7 Dias – 50 MT
+2. 8.909 MB – 30 Dias – 280 MT
+3. 16.589 MB – 30 Dias – 475 MT
+4. 33.280 MB – 30 Dias – 950 MT
 
-# ==================== MENSAGENS ====================
-MSG_BOAS_VINDAS = """👋 Olá! Bem-vindo(a) à *DB Multi-Service* 🔴
+Nota importante: Para pacotes semanais/mensais o número não pode ter "txuna" (crédito em dívida).
 
-Qualidade, confiança e os melhores preços num só lugar!
+Métodos de pagamento:
+- M-Pesa: 846818458
+- E-Mola: 876063563
+"""
 
-Escolha uma opção digitando o número:
+# ==================== MEMÓRIA DAS CONVERSAS ====================
+historico = defaultdict(list)          # histórico de mensagens
+estados = defaultdict(dict)            # estado do pedido (produto, número, etc.)
 
-1️⃣ Ver Ofertas Especiais (Voz + SMS + Internet)
-2️⃣ Ver Ofertas só de Internet
-3️⃣ Métodos de Pagamento
-4️⃣ Falar com um atendente
-
-Digite o número da opção 👆"""
-
-MSG_PAGAMENTO = """💳 *MÉTODOS DE PAGAMENTO*
-
-📱 M-Pesa: *846818458*
-📱 E-Mola: *876063563*
-
-Após pagar, envie o *comprovativo* aqui mesmo que confirmamos e ativamos rapidamente ✅"""
-
-MSG_ATENDENTE = """🙋 Já vamos ligar-te a um dos nossos atendentes para te ajudar diretamente.
-Só um instante, por favor 🙏"""
-
-MSG_NOTA = """⚠️ Nota: para pacotes semanais/mensais, o número não pode ter "txuna" (crédito em dívida)."""
-
-# ==================== ESTADO DAS CONVERSAS ====================
-# Guarda o estado de cada cliente (em memória)
-# Formato: { "2588xxxxxxx": {"estado": "...", "produto": ..., "numero_carregar": ...} }
-estados = defaultdict(dict)
-
-# ==================== FUNÇÕES AUXILIARES ====================
+# ==================== FUNÇÕES ====================
 
 def enviar_mensagem(numero: str, texto: str):
-    """Envia mensagem via Ultramsg"""
     payload = {
         "token": TOKEN,
         "to": numero,
@@ -91,154 +67,105 @@ def enviar_mensagem(numero: str, texto: str):
     try:
         requests.post(API_URL, data=payload, timeout=15)
     except Exception as e:
-        print(f"Erro ao enviar mensagem: {e}")
+        print(f"Erro ao enviar: {e}")
 
 
 def notificar_admins(mensagem: str):
-    """Envia notificação para todos os números de administrador"""
     for admin in ADMIN_NUMBERS:
         enviar_mensagem(admin, mensagem)
 
 
-def limpar_estado(numero: str):
-    """Limpa o estado do cliente"""
+def limpar_conversa(numero: str):
+    if numero in historico:
+        del historico[numero]
     if numero in estados:
         del estados[numero]
 
 
-def formatar_catalogo(categoria: str) -> str:
-    """Gera a mensagem com a lista de produtos de uma categoria"""
-    cat = PRODUTOS[categoria]
-    texto = f"🎁 *{cat['nome']}*\n\n"
+def chamar_groq(numero: str, mensagem_cliente: str) -> str:
+    """Chama a IA da Groq com o contexto da conversa"""
     
-    for key, item in cat["itens"].items():
-        texto += f"*{key}* - {item['nome']}\n   {item['descricao']}\n\n"
+    # Adiciona a mensagem do cliente ao histórico
+    historico[numero].append({"role": "user", "content": mensagem_cliente})
     
-    texto += "Para encomendar, digite o *número* do pacote que deseja.\n"
-    texto += "Ou digite *menu* para voltar ao início."
-    return texto
+    # Mantém só as últimas 10 mensagens para não estourar o contexto
+    if len(historico[numero]) > 10:
+        historico[numero] = historico[numero][-10:]
 
+    system_prompt = f"""
+Tu és o assistente oficial da *DB Multi-Service*, uma loja de confiança em Moçambique que vende pacotes Vodacom a preços promocionais.
 
-# ==================== LÓGICA PRINCIPAL ====================
+O teu objectivo principal é:
+1. Ajudar o cliente de forma simpática e descontraída
+2. Entender o que ele precisa (orçamento, quantos dias, só internet ou voz+internet)
+3. Recomendar o melhor pacote
+4. Conduzir a conversa até à venda
+5. Pedir o número Vodacom onde quer carregar
+6. Pedir o comprovativo de pagamento
+
+TOM DE VOZ:
+- Descontraído, amigável e próximo (usa "tu")
+- Linguagem simples, como se estivesses a falar com um amigo
+- Um pouco de humor leve quando fizer sentido
+- Nunca sejas robótico ou formal demais
+- Sempre positivo e confiante
+
+REGRAS IMPORTANTES:
+- Nunca inventes preços ou pacotes. Usa apenas os dados abaixo.
+- Se o cliente pedir algo que não tens, diz a verdade e oferece a melhor alternativa.
+- Quando o cliente escolher um pacote, pede o número Vodacom a carregar.
+- Depois de ter o número, mostra o resumo + métodos de pagamento e pede o comprovativo.
+- Se o cliente enviar comprovativo ou disser que já pagou, confirma que recebeste e que vais activar.
+
+CATÁLOGO ACTUAL:
+{PRODUTOS_TEXTO}
+
+Responde sempre em português de Moçambique, de forma natural e curta (WhatsApp).
+"""
+
+    messages = [{"role": "system", "content": system_prompt}] + historico[numero]
+
+    try:
+        resposta = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=450
+        )
+        texto_resposta = resposta.choices[0].message.content.strip()
+        
+        # Guarda a resposta da IA no histórico
+        historico[numero].append({"role": "assistant", "content": texto_resposta})
+        
+        return texto_resposta
+    except Exception as e:
+        print(f"Erro Groq: {e}")
+        return "Desculpa, estou com uma pequena instabilidade agora. Podes repetir a mensagem? 🙏"
+
 
 def processar_mensagem(numero: str, texto: str) -> str:
-    """Processa a mensagem do cliente de acordo com o estado actual"""
-    texto = texto.strip().lower()
-    estado_atual = estados[numero].get("estado", "inicio")
+    texto_limpo = texto.strip().lower()
 
-    # --- Comandos globais (funcionam em qualquer estado) ---
-    if texto in ["menu", "início", "inicio", "voltar", "oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"]:
-        limpar_estado(numero)
-        return MSG_BOAS_VINDAS
+    # Comandos especiais
+    if texto_limpo in ["menu", "início", "inicio", "recomeçar", "reset"]:
+        limpar_conversa(numero)
+        return "Olá! 👋 Bem-vindo à *DB Multi-Service*.\n\nEm que posso ajudar-te hoje? Queres ver as ofertas de internet, pacotes com voz, ou já sabes o que precisas?"
 
-    if texto in ["4", "atendente", "humano", "ajuda", "operador"]:
-        limpar_estado(numero)
-        return MSG_ATENDENTE
-
-    if texto in ["3", "pagamento", "pagar", "mpesa", "m-pesa", "emola", "e-mola"]:
-        return MSG_PAGAMENTO
-
-    # --- Fluxo baseado no estado ---
-    if estado_atual == "inicio":
-        if texto in ["1", "ofertas especiais", "especiais", "pacotes", "precos", "preços"]:
-            estados[numero]["estado"] = "escolhendo_especial"
-            return formatar_catalogo("especiais") + "\n\n" + MSG_NOTA
-        
-        elif texto in ["2", "internet", "dados", "megas", "net"]:
-            estados[numero]["estado"] = "escolhendo_internet"
-            return formatar_catalogo("internet")
-        
-        else:
-            return MSG_BOAS_VINDAS
-
-    # --- Escolhendo pacote Especial ---
-    elif estado_atual == "escolhendo_especial":
-        if texto in PRODUTOS["especiais"]["itens"]:
-            produto = PRODUTOS["especiais"]["itens"][texto]
-            estados[numero]["produto"] = produto
-            estados[numero]["categoria"] = "especiais"
-            estados[numero]["estado"] = "aguardando_numero"
-            return (
-                f"✅ Escolheu: *{produto['nome']}*\n"
-                f"Preço: *{produto['preco']} MT*\n\n"
-                f"Agora envie o *número Vodacom* onde deseja carregar o pacote.\n"
-                f"(Exemplo: 84XXXXXXX ou 85XXXXXXX)"
-            )
-        else:
-            return "❌ Opção inválida. Digite o número do pacote (1 a 5) ou *menu* para voltar."
-
-    # --- Escolhendo pacote Internet ---
-    elif estado_atual == "escolhendo_internet":
-        if texto in PRODUTOS["internet"]["itens"]:
-            produto = PRODUTOS["internet"]["itens"][texto]
-            estados[numero]["produto"] = produto
-            estados[numero]["categoria"] = "internet"
-            estados[numero]["estado"] = "aguardando_numero"
-            return (
-                f"✅ Escolheu: *{produto['nome']}*\n"
-                f"Preço: *{produto['preco']} MT*\n\n"
-                f"Agora envie o *número Vodacom* onde deseja carregar o pacote.\n"
-                f"(Exemplo: 84XXXXXXX ou 85XXXXXXX)"
-            )
-        else:
-            return "❌ Opção inválida. Digite o número do pacote (1 a 4) ou *menu* para voltar."
-
-    # --- Aguardando número a carregar ---
-    elif estado_atual == "aguardando_numero":
-        # Aceita números com 9 dígitos começados por 8
-        numero_limpo = "".join(filter(str.isdigit, texto))
-        if len(numero_limpo) == 9 and numero_limpo.startswith("8"):
-            estados[numero]["numero_carregar"] = numero_limpo
-            estados[numero]["estado"] = "aguardando_pagamento"
-            produto = estados[numero]["produto"]
-            return (
-                f"📋 *Resumo do pedido:*\n\n"
-                f"Pacote: *{produto['nome']}*\n"
-                f"Valor: *{produto['preco']} MT*\n"
-                f"Número a carregar: *{numero_limpo}*\n\n"
-                f"{MSG_PAGAMENTO}\n\n"
-                f"Depois de pagar, envie o comprovativo aqui."
-            )
-        else:
-            return (
-                "❌ Número inválido.\n"
-                "Por favor envie um número Vodacom válido com 9 dígitos "
-                "(exemplo: 84XXXXXXX)."
-            )
-
-    # --- Aguardando comprovativo ---
-    elif estado_atual == "aguardando_pagamento":
-        # Qualquer mensagem nesta fase é tratada como possível comprovativo
-        produto = estados[numero]["produto"]
-        num_carregar = estados[numero]["numero_carregar"]
+    # Detecção simples de comprovativo
+    palavras_comprovativo = ["comprovativo", "paguei", "já paguei", "transferi", "mpesa", "e-mola", "emola", "enviei o dinheiro"]
+    if any(p in texto_limpo for p in palavras_comprovativo) or len(texto) > 30:
+        # Provável comprovativo → notifica admin
         agora = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-        # Mensagem para o cliente
-        resposta_cliente = (
-            "✅ *Comprovativo recebido!*\n\n"
-            "Vamos verificar o pagamento e activar o pacote o mais rápido possível.\n"
-            "Obrigado pela preferência! 🙏\n\n"
-            "Digite *menu* se quiser fazer outro pedido."
-        )
-
-        # Notificação para os administradores
         msg_admin = (
-            f"🔔 *NOVO COMPROVATIVO RECEBIDO*\n\n"
+            f"🔔 *NOVO COMPROVATIVO / POSSÍVEL PAGAMENTO*\n\n"
             f"Cliente: {numero}\n"
-            f"Pacote: {produto['nome']}\n"
-            f"Valor: {produto['preco']} MT\n"
-            f"Número a carregar: {num_carregar}\n"
             f"Hora: {agora}\n\n"
-            f"Mensagem do cliente:\n{texto}"
+            f"Mensagem:\n{texto}"
         )
         notificar_admins(msg_admin)
 
-        # Limpa o estado (ou podes manter se quiseres histórico)
-        limpar_estado(numero)
-        return resposta_cliente
-
-    # Fallback
-    return MSG_BOAS_VINDAS
+    # Chama a IA
+    return chamar_groq(numero, texto)
 
 
 # ==================== WEBHOOK ====================
@@ -253,7 +180,6 @@ def webhook():
         numero = msg_data.get("from", "")
         texto_recebido = msg_data.get("body", "") or ""
 
-        # Processa apenas mensagens de texto
         if texto_recebido:
             resposta = processar_mensagem(numero, texto_recebido)
             enviar_mensagem(numero, resposta)
@@ -263,7 +189,7 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Bot DB Multi-Service v2.0 está a funcionar! ✅"
+    return "Bot DB Multi-Service v3.0 (Groq AI) está a funcionar! ✅"
 
 
 if __name__ == "__main__":
