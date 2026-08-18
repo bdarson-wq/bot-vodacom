@@ -127,7 +127,7 @@ Responde sempre em português de Moçambique, de forma natural e curta (WhatsApp
 
     try:
         resposta = client.chat.completions.create(
-            model=model="lhama-3.3-70b-versátil",
+            model=model="lhama-3.3-70b-versatil",
             messages=messages,
             temperature=0.7,
             max_tokens=450
