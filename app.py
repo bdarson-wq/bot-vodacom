@@ -375,7 +375,130 @@ def processar_mensagem(numero: str, texto: str) -> str:
 
 # ==================== WEBHOOK ====================
 
-@app.route("/webhook", methods=["POST"])
+# ==================== SMS M-PESA / E-MOLA ====================
+
+def extrair_valor_sms(texto: str):
+    """Extrai valores monetários típicos de SMS M-Pesa/E-Mola."""
+    t = texto.replace(" ", "").replace(",", ".")
+    # Padrões: 468.00 MT | 468MT | MT468 | 468,00
+    candidatos = re.findall(
+        r"(?:MT|mt|Mts|mts)?\s*(\d{1,5}(?:[.,]\d{2})?)\s*(?:MT|mt|Mts|mts)?",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    valores = []
+    for c in candidatos:
+        try:
+            v = float(c.replace(",", "."))
+            if 2 <= v <= 5000:
+                valores.append(int(round(v)))
+        except ValueError:
+            continue
+    return valores
+
+
+def extrair_id_transacao(texto: str):
+    """Tenta apanhar IDs tipo CDE1H2I3J4 ou números longos."""
+    m = re.search(r"\b([A-Z0-9]{8,12})\b", texto)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(\d{10,14})\b", texto)
+    if m:
+        return m.group(1)
+    return None
+
+
+def match_pedido_por_valor(valor: int, tolerancia: int = 2):
+    """
+    Procura pedido pendente cujo preco_cliente esteja perto do valor da SMS.
+    Prioridade: mais recente primeiro.
+    """
+    candidatos = [
+        p for p in pedidos.values()
+        if p["estado"] in ("aguardando_pagamento", "pendente_confirmacao")
+    ]
+    # mais recentes primeiro
+    candidatos.sort(key=lambda x: x["id"], reverse=True)
+
+    exact = [p for p in candidatos if abs(p["preco_cliente"] - valor) <= tolerancia]
+    if exact:
+        return exact[0]
+    return None
+
+
+def processar_sms_pagamento(texto_sms: str, origem: str = "sms") -> dict:
+    """
+    Processa texto de SMS M-Pesa/E-Mola.
+    Retorna dict com resultado para log/resposta HTTP.
+    """
+    if not texto_sms or len(texto_sms.strip()) < 5:
+        return {"ok": False, "motivo": "texto vazio"}
+
+    valores = extrair_valor_sms(texto_sms)
+    tx_id = extrair_id_transacao(texto_sms)
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    if not valores:
+        notificar_admins(
+            f"📩 SMS recebida sem valor claro ({origem})\n"
+            f"Hora: {agora}\n\n{texto_sms}"
+        )
+        return {"ok": False, "motivo": "sem valor", "texto": texto_sms}
+
+    # tenta match com o valor mais "plausível" (maior primeiro costuma ser o montante)
+    pedido = None
+    valor_usado = None
+    for v in sorted(set(valores), reverse=True):
+        pedido = match_pedido_por_valor(v, tolerancia=2)
+        if pedido:
+            valor_usado = v
+            break
+
+    if not pedido:
+        notificar_admins(
+            f"📩 SMS sem pedido correspondente\n"
+            f"Valores detectados: {valores}\n"
+            f"ID: {tx_id or 'n/d'}\n"
+            f"Hora: {agora}\n\n{texto_sms}\n\n"
+            f"Usa *pedidos* e *confirmar X* se for válido."
+        )
+        return {
+            "ok": False,
+            "motivo": "sem match",
+            "valores": valores,
+            "tx_id": tx_id,
+        }
+
+    # Match encontrado → confirmar automaticamente
+    pedido["estado"] = "confirmado"
+    pedido["comprovativo"] = texto_sms
+    pedido["sms_valor"] = valor_usado
+    pedido["sms_id"] = tx_id
+    pedido["confirmado_em"] = agora
+
+    # Avisa o cliente
+    enviar_mensagem(
+        pedido["wa"],
+        f"✅ Pagamento do pedido *#{pedido['id']}* confirmado!\n"
+        f"Vamos activar o pacote em breve. Obrigado 🙏",
+    )
+
+    # Ficha Agent App para ti
+    notificar_admins(
+        f"✅ *PAGAMENTO CONFIRMADO POR SMS*\n"
+        f"Pedido #{pedido['id']}\n"
+        f"Valor SMS: {valor_usado} MT | ID: {tx_id or 'n/d'}\n"
+        f"Hora: {agora}\n\n"
+        f"{ficha_agent(pedido)}"
+    )
+
+    return {
+        "ok": True,
+        "pedido_id": pedido["id"],
+        "valor": valor_usado,
+        "tx_id": tx_id,
+    }
+    @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True) or {}
     msg = data.get("data", {})
