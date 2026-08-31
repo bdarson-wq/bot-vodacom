@@ -240,8 +240,12 @@ def processar_admin(texto):
     if m:
         pid = int(m.group(1))
         if pid not in pedidos:
+
+
             return "Pedido #{} não existe.".format(pid)
         pedidos[pid]["estado"] = "activado"
         enviar_mensagem(
             pedidos[pid]["wa"],
             "🎉 Pedido #{} activ
+            if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
